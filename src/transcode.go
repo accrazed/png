@@ -5,8 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
-	"io/ioutil"
-	"os"
+	"io"
 )
 
 type Transcoder struct {
@@ -17,14 +16,14 @@ type Transcoder struct {
 
 	// seenset keeps track of which index in data the ChunkTypes begin
 	// no support for multiple chunks of the same type yet
-	SeenSet    map[string][]uint32
-	DataChunks []*ImageData
+	SeenSet    map[ChunkType][]uint32
+	DataChunks []*Image
 	DataState  DataState
 
 	Filterer   *AdaptiveFilter
 	compressor Compresser
 }
-type ImageData struct {
+type Image struct {
 	DataState DataState
 	data      []byte
 	Scanlines []Scanline
@@ -41,8 +40,8 @@ func (t *Transcoder) String() string {
 		t.Width, t.Height, t.BitDepth, t.ColorType, t.SeenSet)
 }
 
-func NewTranscoder(f *os.File) (*Transcoder, error) {
-	b, err := ioutil.ReadAll(f)
+func NewTranscoder(file io.Reader) (*Transcoder, error) {
+	b, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read file: %v", err)
 	}
@@ -54,9 +53,10 @@ func NewTranscoder(f *os.File) (*Transcoder, error) {
 	//? todo: consider the very chaotic idea of making chunk processing
 	//? concurrent for the memes hehehe
 	t := &Transcoder{
-		SeenSet:   make(map[string][]uint32),
+		SeenSet:   make(map[ChunkType][]uint32),
 		DataState: DataStateCompressed,
 	}
+
 	// Process raw data
 	var pos uint32 = 8
 	for {
@@ -64,14 +64,19 @@ func NewTranscoder(f *os.File) (*Transcoder, error) {
 			break
 		}
 
+		// file length
 		loc := pos
-		length := binary.BigEndian.Uint32(b[pos : pos+4])
+		len := binary.BigEndian.Uint32(b[pos : pos+4])
+
 		pos += 4
-		typ := b[pos : pos+4]
+		typ := ChunkType(string(b[pos : pos+4]))
+
 		pos += 4
-		chunk := b[pos : pos+length]
-		pos += length
+		chunk := b[pos : pos+len]
+
+		pos += len
 		crc := b[pos : pos+4]
+
 		pos += 4
 
 		err := t.initChunk(loc, typ, chunk, crc)
@@ -83,13 +88,13 @@ func NewTranscoder(f *os.File) (*Transcoder, error) {
 	return t, err
 }
 
-func (t *Transcoder) initChunk(loc uint32, typ, rawData, crc []byte) error {
-	if crc32.ChecksumIEEE(append(typ, rawData...)) != binary.BigEndian.Uint32(crc) {
-		return fmt.Errorf("crc32 failed for chunk %s (byte %v)", string(typ), loc)
+func (t *Transcoder) initChunk(loc uint32, chunkType ChunkType, rawData, crc []byte) error {
+	if crc32.ChecksumIEEE(append([]byte(chunkType), rawData...)) != binary.BigEndian.Uint32(crc) {
+		return fmt.Errorf("crc32 failed for chunk %s (byte %v)", string(chunkType), loc)
 	}
 
-	switch string(typ) {
-	case "IHDR":
+	switch chunkType {
+	case ImageHeaderType:
 		t.Width = binary.BigEndian.Uint32(rawData[:4])
 		t.Height = binary.BigEndian.Uint32(rawData[4:8])
 
@@ -118,21 +123,21 @@ func (t *Transcoder) initChunk(loc uint32, typ, rawData, crc []byte) error {
 		// Interlace method
 		t.Interlace = InterlaceMethod(rawData[12])
 
-	case "IDAT":
-		if _, ok := t.SeenSet["IHDR"]; !ok {
+	case ImageDataType:
+		if _, ok := t.SeenSet[ImageHeaderType]; !ok {
 			return fmt.Errorf("IDAT header declared before IHDR")
 		}
 		t.DataChunks = append(t.DataChunks, t.initImageData(rawData))
-	case "IEND":
+	case ImageEndType:
 		// only seenset is updated
 	default:
-		fmt.Printf("WARNING: unimplemented type %s\n", string(typ))
+		fmt.Printf("WARNING: unimplemented type %s\n", string(chunkType))
 	}
 
-	if _, ok := t.SeenSet[string(typ)]; !ok {
-		t.SeenSet[string(typ)] = make([]uint32, 0)
+	if _, ok := t.SeenSet[chunkType]; !ok {
+		t.SeenSet[chunkType] = make([]uint32, 0)
 	}
-	t.SeenSet[string(typ)] = append(t.SeenSet[string(typ)], loc)
+	t.SeenSet[chunkType] = append(t.SeenSet[chunkType], loc)
 
 	return nil
 }
@@ -155,9 +160,9 @@ func verifyBitDepthAndColorType(bd BitDepth, ct ColorType) error {
 	return nil
 }
 
-func (t *Transcoder) initImageData(rawData []byte) *ImageData {
+func (t *Transcoder) initImageData(rawData []byte) *Image {
 
-	return &ImageData{
+	return &Image{
 		DataState: DataStateUnfiltered,
 		data:      rawData,
 		Scanlines: nil,

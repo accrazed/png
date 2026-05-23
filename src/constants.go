@@ -49,6 +49,15 @@ const (
 	InterlaceMethodAdam7
 )
 
+type ChunkType string
+
+const (
+	ImageHeaderType  ChunkType = "IHDR"
+	PaletteTableType ChunkType = "PLTE"
+	ImageDataType    ChunkType = "IDAT"
+	ImageEndType     ChunkType = "IEND"
+)
+
 var (
 	PNG_SIGNATURE = []byte{137, 80, 78, 71, 13, 10, 26, 10}
 )
